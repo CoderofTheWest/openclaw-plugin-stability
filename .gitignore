@@ -1,0 +1,23 @@
+# Dependencies
+node_modules/
+
+# Runtime data (plugin-local state)
+data/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# Environment
+.env
+.env.*

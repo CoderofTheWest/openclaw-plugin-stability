@@ -1,0 +1,84 @@
+{
+  "id": "stability",
+  "name": "Agent Stability & Introspection",
+  "description": "Entropy monitoring, confabulation detection, loop guards, principle-aligned growth tracking, and structured heartbeat decisions. Makes any OpenClaw agent more stable, self-aware, and resistant to hallucination and drift.",
+  "version": "0.1.0",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "entropy": {
+        "type": "object",
+        "description": "Entropy monitoring configuration",
+        "properties": {
+          "enabled": { "type": "boolean", "default": true },
+          "warningThreshold": { "type": "number", "default": 0.8 },
+          "criticalThreshold": { "type": "number", "default": 1.0 },
+          "sustainedMinutes": { "type": "number", "default": 45 },
+          "injectGroundingOnCritical": { "type": "boolean", "default": false }
+        }
+      },
+      "principles": {
+        "type": "object",
+        "description": "Principle alignment configuration. Define principles in SOUL.md or here.",
+        "properties": {
+          "source": { "type": "string", "default": "soul.md" },
+          "fallback": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": { "type": "string" },
+                "positivePatterns": { "type": "array", "items": { "type": "string" } },
+                "negativePatterns": { "type": "array", "items": { "type": "string" } },
+                "groundingRequired": { "type": "boolean" }
+              }
+            }
+          }
+        }
+      },
+      "heartbeat": {
+        "type": "object",
+        "description": "Heartbeat decision framework configuration",
+        "properties": {
+          "decisionFramework": { "type": "boolean", "default": true },
+          "decisionLog": { "type": "boolean", "default": true },
+          "recentDecisionsInPrompt": { "type": "number", "default": 3 }
+        }
+      },
+      "loopDetection": {
+        "type": "object",
+        "description": "Tool loop detection configuration",
+        "properties": {
+          "consecutiveToolThreshold": { "type": "number", "default": 5 },
+          "fileRereadThreshold": { "type": "number", "default": 3 },
+          "injectWarning": { "type": "boolean", "default": true }
+        }
+      },
+      "governance": {
+        "type": "object",
+        "description": "Rate limiting and quiet hours",
+        "properties": {
+          "investigationsPerHour": { "type": "number", "default": 3 },
+          "investigationsPerDay": { "type": "number", "default": 20 },
+          "quietHours": {
+            "type": "object",
+            "properties": {
+              "start": { "type": "string", "default": "22:00" },
+              "end": { "type": "string", "default": "07:00" }
+            }
+          }
+        }
+      },
+      "detectors": {
+        "type": "object",
+        "description": "Behavioral detector toggles",
+        "properties": {
+          "temporalMismatch": { "type": "boolean", "default": true },
+          "qualityDecay": { "type": "boolean", "default": true },
+          "recursiveMeta": { "type": "boolean", "default": true }
+        }
+      }
+    }
+  }
+}

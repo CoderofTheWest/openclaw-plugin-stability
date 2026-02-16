@@ -1,0 +1,40 @@
+{
+  "name": "openclaw-plugin-stability",
+  "version": "0.1.0",
+  "description": "Agent stability, introspection, and anti-drift framework for OpenClaw. Provides entropy monitoring, confabulation detection, loop guards, principle-aligned growth tracking, and structured heartbeat decisions.",
+  "main": "index.js",
+  "keywords": [
+    "openclaw",
+    "plugin",
+    "stability",
+    "entropy",
+    "introspection",
+    "anti-hallucination",
+    "identity",
+    "heartbeat"
+  ],
+  "author": "Chris Hunt",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "openclaw": {
+    "type": "plugin"
+  },
+  "openclaw.extensions": {
+    "stability": "./openclaw.plugin.json"
+  },
+  "files": [
+    "index.js",
+    "openclaw.plugin.json",
+    "config.default.json",
+    "lib/",
+    "hooks/",
+    "services/",
+    "templates/"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/CoderOfTheWest/openclaw-plugin-stability"
+  }
+}

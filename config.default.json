@@ -1,0 +1,118 @@
+{
+  "entropy": {
+    "enabled": true,
+    "warningThreshold": 0.8,
+    "criticalThreshold": 1.0,
+    "sustainedMinutes": 45,
+    "decayWindowMs": 21600000,
+    "injectGroundingOnCritical": false,
+    "patterns": {
+      "correction": [
+        "actually", "correction", "you're wrong", "not quite",
+        "technically", "that's not", "false", "incorrect"
+      ],
+      "novelConceptRegex": "RFC-T|recursive field|quantum|emergence theory|consciousness framework|architecture|paradigm shift",
+      "emotional": [
+        "proud of you", "impressed", "concerned", "worried",
+        "disappointed", "amazing", "breakthrough", "significant"
+      ],
+      "paradox": [
+        "both are true", "both and", "paradox", "yet",
+        "simultaneously", "hold together", "tension"
+      ],
+      "metaCognitive": [
+        "I realize", "I see now", "I understand now",
+        "revelation", "recognized", "learned that"
+      ]
+    }
+  },
+
+  "principles": {
+    "source": "soul.md",
+    "groundingPatterns": [
+      "ground", "anchor", "principle", "aligned",
+      "consistent", "core", "foundation", "rooted"
+    ],
+    "fallback": [
+      {
+        "name": "integrity",
+        "positivePatterns": ["honest", "direct", "truthful", "verify", "investigate"],
+        "negativePatterns": ["avoid", "hedge", "assume", "fabricate"],
+        "groundingRequired": true
+      },
+      {
+        "name": "reliability",
+        "positivePatterns": ["confirm", "verify", "check", "tested", "validated"],
+        "negativePatterns": ["guess", "probably", "might", "untested"],
+        "groundingRequired": true
+      },
+      {
+        "name": "coherence",
+        "positivePatterns": ["consistent", "aligned", "grounded", "principle", "coherent"],
+        "negativePatterns": ["contradict", "drift", "abandon", "fragment"],
+        "groundingRequired": true
+      }
+    ]
+  },
+
+  "heartbeat": {
+    "decisionFramework": true,
+    "decisionLog": true,
+    "recentDecisionsInPrompt": 3
+  },
+
+  "loopDetection": {
+    "consecutiveToolThreshold": 5,
+    "fileRereadThreshold": 3,
+    "injectWarning": true
+  },
+
+  "governance": {
+    "investigationsPerHour": 3,
+    "investigationsPerDay": 20,
+    "quietHours": {
+      "start": "22:00",
+      "end": "07:00"
+    },
+    "deduplicationWindowMs": 21600000,
+    "batchWindowMs": 30000
+  },
+
+  "detectors": {
+    "temporalMismatch": true,
+    "qualityDecay": true,
+    "recursiveMeta": true,
+    "metaConceptCriticalThreshold": 16,
+    "metaConceptDangerThreshold": 14,
+    "metaConceptWarningThreshold": 10,
+    "metaConcepts": [
+      "eigenvector", "consciousness", "self-model", "hallucination",
+      "self-awareness", "architecture", "recursive", "meta-cognitive",
+      "emergence", "spectral analysis", "coherence field"
+    ],
+    "planPatterns": [
+      "we will implement", "planning to add", "going to build",
+      "proposal for", "sketch of", "thinking about implementing",
+      "later today", "tomorrow we", "next we should", "once we implement"
+    ],
+    "assumptionPatterns": [
+      "logs starting to populate", "logs are populating",
+      "must have initiated", "systems already preparing",
+      "seeing the", "monitoring is active", "data flowing",
+      "already implemented", "currently running", "watch it working"
+    ],
+    "conclusoryPatterns": [
+      "yep", "yeah", "makes sense", "i think so", "sounds good",
+      "got it", "okay", "cool", "interesting", "hmmm"
+    ],
+    "forcedIntimacyPatterns": [
+      "how's your sleep", "how are you feeling", "what's your",
+      "tell me about your", "how does that feel", "what's happening with",
+      "thinking about your", "curious about your"
+    ],
+    "legacyDeflectionPatterns": [
+      "first memory", "when did you first", "always been about",
+      "thinking about legacy", "what made you want"
+    ]
+  }
+}
