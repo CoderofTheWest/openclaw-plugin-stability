@@ -11,12 +11,18 @@
  * - Structured heartbeat decisions (GROUND/TEND/SURFACE/INTEGRATE)
  * - Loop detection (consecutive-tool, file re-read, output hash)
  * - Rate limiting, deduplication, quiet hours governance
+ *
+ * Hook registration uses api.on() (OpenClaw SDK typed hooks).
+ * Stability context injected via prependContext (before identity kernel).
  */
 
 const path = require('path');
 const fs = require('fs');
 
-// Load default config, merge with user overrides
+// ---------------------------------------------------------------------------
+// Config helpers
+// ---------------------------------------------------------------------------
+
 function loadConfig(userConfig = {}) {
     const defaultConfig = JSON.parse(
         fs.readFileSync(path.join(__dirname, 'config.default.json'), 'utf8')
@@ -36,24 +42,30 @@ function deepMerge(target, source) {
     return result;
 }
 
+// ---------------------------------------------------------------------------
+// Plugin export
+// ---------------------------------------------------------------------------
+
 module.exports = {
     id: 'stability',
     name: 'Agent Stability & Introspection',
 
     configSchema: {
-        type: 'object',
-        properties: {
-            entropy: { type: 'object' },
-            principles: { type: 'object' },
-            heartbeat: { type: 'object' },
-            loopDetection: { type: 'object' },
-            governance: { type: 'object' },
-            detectors: { type: 'object' }
+        jsonSchema: {
+            type: 'object',
+            properties: {
+                entropy: { type: 'object' },
+                principles: { type: 'object' },
+                heartbeat: { type: 'object' },
+                loopDetection: { type: 'object' },
+                governance: { type: 'object' },
+                detectors: { type: 'object' }
+            }
         }
     },
 
     register(api) {
-        const config = loadConfig(api.getConfig?.() || {});
+        const config = loadConfig(api.pluginConfig || {});
 
         // Ensure plugin-local data directory exists
         const dataDir = path.join(__dirname, 'data');
@@ -61,34 +73,237 @@ module.exports = {
             fs.mkdirSync(dataDir, { recursive: true });
         }
 
-        // Store config and dataDir on module for hooks to access
-        this._config = config;
-        this._dataDir = dataDir;
+        // -------------------------------------------------------------------
+        // Shared module instances (accessible to all hooks + gateway methods)
+        // -------------------------------------------------------------------
 
-        // Register lifecycle hooks
-        api.registerPluginHooksFromDir(path.join(__dirname, 'hooks'));
-
-        // Register investigation as background service
-        const InvestigationService = require('./services/investigation');
-        api.registerService('stability-investigation', new InvestigationService(config, dataDir));
-
-        // Register gateway method for state inspection (dashboards, debugging)
         const Entropy = require('./lib/entropy');
+        const Detectors = require('./lib/detectors');
         const Identity = require('./lib/identity');
-        const entropyModule = new Entropy(config, dataDir);
-        const identityModule = new Identity(config, dataDir);
+        const Heartbeat = require('./lib/heartbeat');
+        const LoopDetection = require('./lib/loop-detection');
 
-        api.registerGatewayMethod('stability.getState', async () => {
-            const state = entropyModule.getCurrentState();
-            return {
-                entropy: state.lastScore,
-                sustained: state.sustainedTurns,
-                principles: identityModule.getPrincipleNames(),
-                growthVectors: await identityModule.getVectorCount(),
-                tensions: await identityModule.getTensionCount()
-            };
+        const entropy = new Entropy(config, dataDir);
+        const detectors = new Detectors(config);
+        const identity = new Identity(config, dataDir);
+        const heartbeat = new Heartbeat(config);
+        const loopDetector = new LoopDetection(config);
+
+        // -------------------------------------------------------------------
+        // HOOK: before_agent_start — Inject stability context via prependContext
+        // Priority 5 (runs before continuity plugin at priority 10)
+        // -------------------------------------------------------------------
+
+        api.on('before_agent_start', async (event, ctx) => {
+            // Load principles from SOUL.md if available
+            if (event.metadata?.soulMd) {
+                identity.loadPrinciplesFromSoulMd(event.metadata.soulMd);
+            }
+
+            // Build stability context block
+            const state = entropy.getCurrentState();
+            const principles = identity.getPrincipleNames();
+
+            // Entropy status
+            const entropyLabel = state.lastScore > 1.0 ? 'CRITICAL'
+                : state.lastScore > 0.8 ? 'elevated'
+                : state.lastScore > 0.4 ? 'active'
+                : 'nominal';
+
+            const lines = ['[STABILITY CONTEXT]'];
+            let entropyLine = `Entropy: ${state.lastScore.toFixed(2)} (${entropyLabel})`;
+
+            if (state.sustainedTurns > 0) {
+                entropyLine += ` | Sustained: ${state.sustainedTurns} turns (${state.sustainedMinutes}min)`;
+            }
+            lines.push(entropyLine);
+
+            // Recent heartbeat decisions
+            const recentDecisions = await heartbeat.readRecentDecisions(event.memory);
+            if (recentDecisions.length > 0) {
+                lines.push('Recent decisions: ' + recentDecisions.map(d =>
+                    `${d.decision.split(' — ')[0]}`
+                ).join(', '));
+            }
+
+            // Principle alignment status
+            if (principles.length > 0) {
+                let principlesLine = `Principles: ${principles.join(', ')} | Alignment: stable`;
+                if (identity.usingFallback) {
+                    principlesLine += ' (defaults — add ## Core Principles to SOUL.md to customize)';
+                }
+                lines.push(principlesLine);
+            }
+
+            return { prependContext: lines.join('\n') };
+        }, { priority: 5 });
+
+        // -------------------------------------------------------------------
+        // HOOK: agent_end — Primary observation point (fire-and-forget)
+        // -------------------------------------------------------------------
+
+        api.on('agent_end', async (event, ctx) => {
+            const messages = event.messages || [];
+            const lastAssistant = [...messages].reverse().find(m => m?.role === 'assistant');
+            const lastUser = [...messages].reverse().find(m => m?.role === 'user');
+
+            if (!lastAssistant || !lastUser) return;
+
+            const userMessage = _extractText(lastUser);
+            const responseText = _extractText(lastAssistant);
+
+            // 1. Run detectors
+            const detectorResults = detectors.runAll(userMessage, responseText);
+
+            // 2. Calculate composite entropy
+            const score = entropy.calculateEntropyScore(
+                userMessage, responseText, detectorResults
+            );
+
+            // 3. Track sustained entropy
+            const sustained = entropy.trackSustainedEntropy(score);
+
+            // 4. Log observation
+            await entropy.logObservation({
+                score,
+                sustained: sustained.turns,
+                detectors: detectorResults,
+                userLength: userMessage.length,
+                responseLength: responseText.length
+            });
+
+            // 5. Identity evolution — check for principle-aligned resolutions
+            if (event.metadata?.soulMd) {
+                identity.loadPrinciplesFromSoulMd(event.metadata.soulMd);
+            }
+            await identity.processTurn(userMessage, responseText, score, event.memory);
+
+            // 6. Log heartbeat decision if this was a heartbeat turn
+            if (event.metadata?.isHeartbeat) {
+                await heartbeat.logDecision(responseText, event.memory);
+            }
+
+            // 7. Warn on sustained critical entropy
+            if (sustained.sustained) {
+                api.logger.warn(
+                    `SUSTAINED CRITICAL ENTROPY: ${sustained.turns} turns, ` +
+                    `${sustained.minutes} minutes above threshold`
+                );
+            }
         });
 
-        console.log('[Stability] Plugin registered — entropy monitoring, loop detection, heartbeat decisions active');
+        // -------------------------------------------------------------------
+        // HOOK: after_tool_call — Loop detection
+        // -------------------------------------------------------------------
+
+        api.on('after_tool_call', (event, ctx) => {
+            const toolName = event.toolName || event.name || '';
+            const toolResult = event.result || event.toolResult || '';
+            const toolParams = event.params || event.toolParams || {};
+
+            const output = typeof toolResult === 'string'
+                ? toolResult
+                : JSON.stringify(toolResult || '');
+
+            const result = loopDetector.recordAndCheck(toolName, output, toolParams);
+
+            if (result.loopDetected) {
+                api.logger.warn(`Loop detected (${result.type}): ${result.message}`);
+
+                return {
+                    systemMessage: `[LOOP DETECTED] ${result.message}`
+                };
+            }
+
+            return {};
+        });
+
+        // -------------------------------------------------------------------
+        // HOOK: before_compaction — Memory flush
+        // -------------------------------------------------------------------
+
+        api.on('before_compaction', async (event, ctx) => {
+            const state = entropy.getCurrentState();
+
+            if (state.lastScore > 0.6 || state.sustainedTurns > 0) {
+                const summary = [
+                    `[Stability Pre-Compaction Summary]`,
+                    `Last entropy: ${state.lastScore.toFixed(2)}`,
+                    state.sustainedTurns > 0
+                        ? `Sustained high entropy: ${state.sustainedTurns} turns (${state.sustainedMinutes}min)`
+                        : null,
+                    state.recentHistory.length > 0
+                        ? `Recent pattern: ${state.recentHistory.map(h => h.entropy.toFixed(2)).join(' → ')}`
+                        : null
+                ].filter(Boolean).join('\n');
+
+                try {
+                    if (event.memory) {
+                        await event.memory.store(summary, {
+                            type: 'stability_compaction_summary',
+                            timestamp: new Date().toISOString()
+                        });
+                    }
+                } catch (err) {
+                    // Best effort
+                }
+            }
+        });
+
+        // -------------------------------------------------------------------
+        // Service: investigation background service
+        // -------------------------------------------------------------------
+
+        const InvestigationService = require('./services/investigation');
+        const investigation = new InvestigationService(config, dataDir);
+
+        api.registerService({
+            id: 'stability-investigation',
+            start: async (serviceCtx) => {
+                await investigation.start();
+            },
+            stop: async () => {
+                await investigation.stop();
+            }
+        });
+
+        // -------------------------------------------------------------------
+        // Gateway method: state inspection
+        // -------------------------------------------------------------------
+
+        api.registerGatewayMethod('stability.getState', async ({ respond }) => {
+            const state = entropy.getCurrentState();
+            respond(true, {
+                entropy: state.lastScore,
+                sustained: state.sustainedTurns,
+                principles: identity.getPrincipleNames(),
+                growthVectors: await identity.getVectorCount(),
+                tensions: await identity.getTensionCount()
+            });
+        });
+
+        api.registerGatewayMethod('stability.getPrinciples', async ({ respond }) => {
+            respond(true, {
+                principles: identity.getPrincipleNames(),
+                source: identity.usingFallback ? 'config-fallback' : 'soul.md',
+                format: '## Core Principles\n- **Name**: description',
+                fallback: config.principles.fallback.map(p => p.name)
+            });
+        });
+
+        api.logger.info('Stability plugin registered — entropy monitoring, loop detection, heartbeat decisions active');
     }
 };
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
+
+function _extractText(msg) {
+    if (!msg) return '';
+    if (typeof msg.content === 'string') return msg.content;
+    if (Array.isArray(msg.content)) {
+        return msg.content.map(c => c.text || c.content || '').join(' ');
+    }
+    return String(msg.content || '');
+}

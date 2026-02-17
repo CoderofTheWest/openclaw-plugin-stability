@@ -202,6 +202,10 @@ This plugin was extracted from a production AI agent system that ran continuousl
 
 The math is model-agnostic. It analyzes response text, not model internals. The same entropy calculations and confabulation detectors work whether your agent runs on Claude, GPT-4, DeepSeek, or a local model through Ollama.
 
+## Known Issues
+
+- **Context blocks visible in chat UI**: The `[STABILITY CONTEXT]` block injected via `prependContext` is displayed as part of the user message in OpenClaw's web dashboard. This is cosmetic — the model processes it correctly as stability awareness, but the dashboard doesn't yet collapse or hide plugin-injected content. This is an OpenClaw dashboard limitation, not a plugin bug.
+
 ## License
 
 MIT
