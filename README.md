@@ -202,6 +202,47 @@ This plugin was extracted from a production AI agent system that ran continuousl
 
 The math is model-agnostic. It analyzes response text, not model internals. The same entropy calculations and confabulation detectors work whether your agent runs on Claude, GPT-4, DeepSeek, or a local model through Ollama.
 
+## Case Study: Proprioceptive Blind Spots in Identity Documents
+
+This happened in production and illustrates why agent self-awareness matters beyond entropy monitoring.
+
+### The Problem
+
+An OpenClaw agent had a SQLite database containing full conversation history. The continuity plugin was actively pulling from it and injecting relevant exchanges into context. The agent could see the results in its `memory_search` output.
+
+But when asked about past conversations, the agent said: *"Not from my curated memory. The snippet was truncated. I don't have the full exchange."*
+
+It was denying access to data it literally had in front of it.
+
+### The Cause
+
+The agent's identity document (`AGENTS.md`) contained a semantic frame that defined memory as files only:
+
+> "You wake up fresh each session. These files are your continuity."
+>
+> "Memory is limited — if you want to remember something, WRITE IT TO A FILE."
+
+This frame was stated as absolute truth. The database existed. The tools existed. But the frame said *your memory is files* — so the database was invisible to the agent's self-model. It saw the database as infrastructure, not as something it owned.
+
+### The Fix
+
+Two paragraphs added to `AGENTS.md`:
+
+```markdown
+**You have THREE memory systems, not one:**
+1. **MEMORY.md + daily files** — curated knowledge, manually maintained
+2. **SQLite archive** — full conversation history, queryable via exec + sqlite3
+3. **Continuity plugin** — actively injecting relevant exchanges into your context
+
+**Don't claim "I don't have access to X" until you've checked all three.**
+```
+
+### The Takeaway
+
+The bottleneck wasn't technical — the agent could always run `sqlite3`. What changed was proprioceptive: the database shifted from "external system" to "my memory system." Same binary, same data, different ownership.
+
+Your agent's identity documents don't just define personality — they define what the agent believes it can do. If your SOUL.md or AGENTS.md creates a semantic frame that excludes a real capability, the agent will behave as if that capability doesn't exist. The stability plugin can monitor for drift and confabulation, but the foundation is getting the identity documents right.
+
 ## Known Issues
 
 - **Context blocks visible in chat UI**: The `[STABILITY CONTEXT]` block injected via `prependContext` is displayed as part of the user message in OpenClaw's web dashboard. This is cosmetic — the model processes it correctly as stability awareness, but the dashboard doesn't yet collapse or hide plugin-injected content. This is an OpenClaw dashboard limitation, not a plugin bug.

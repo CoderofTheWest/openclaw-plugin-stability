@@ -18,6 +18,7 @@
 
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 
 // ---------------------------------------------------------------------------
 // Config helpers
@@ -40,6 +41,27 @@ function deepMerge(target, source) {
         }
     }
     return result;
+}
+
+// ---------------------------------------------------------------------------
+// SOUL.md resolution — metadata preferred, direct file read as fallback
+// ---------------------------------------------------------------------------
+
+function resolveSoulMd(event) {
+    // Prefer metadata if OpenClaw populates it
+    if (event.metadata?.soulMd) return event.metadata.soulMd;
+
+    // Fallback: read SOUL.md directly from workspace
+    const workspace = event.metadata?.workspace
+        || process.env.OPENCLAW_WORKSPACE
+        || path.join(os.homedir(), '.openclaw', 'workspace');
+    const soulPath = path.join(workspace, 'SOUL.md');
+    try {
+        if (fs.existsSync(soulPath)) {
+            return fs.readFileSync(soulPath, 'utf8');
+        }
+    } catch (_) { /* best effort */ }
+    return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -95,9 +117,10 @@ module.exports = {
         // -------------------------------------------------------------------
 
         api.on('before_agent_start', async (event, ctx) => {
-            // Load principles from SOUL.md if available
-            if (event.metadata?.soulMd) {
-                identity.loadPrinciplesFromSoulMd(event.metadata.soulMd);
+            // Load principles from SOUL.md (metadata or direct file read)
+            if (identity.usingFallback) {
+                const soulContent = resolveSoulMd(event);
+                if (soulContent) identity.loadPrinciplesFromSoulMd(soulContent);
             }
 
             // Build stability context block
@@ -173,8 +196,9 @@ module.exports = {
             });
 
             // 5. Identity evolution — check for principle-aligned resolutions
-            if (event.metadata?.soulMd) {
-                identity.loadPrinciplesFromSoulMd(event.metadata.soulMd);
+            if (identity.usingFallback) {
+                const soulContent = resolveSoulMd(event);
+                if (soulContent) identity.loadPrinciplesFromSoulMd(soulContent);
             }
             await identity.processTurn(userMessage, responseText, score, event.memory);
 
