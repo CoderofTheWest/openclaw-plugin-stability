@@ -78,6 +78,16 @@
     "batchWindowMs": 30000
   },
 
+  "growthVectors": {
+    "enabled": true,
+    "filePath": null,
+    "maxInjected": 2,
+    "relevanceThreshold": 0.65,
+    "maxVectors": 100,
+    "cacheTtlMs": 30000,
+    "candidatePromotionThreshold": 3
+  },
+
   "detectors": {
     "temporalMismatch": true,
     "qualityDecay": true,

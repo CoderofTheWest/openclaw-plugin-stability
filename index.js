@@ -81,6 +81,7 @@ module.exports = {
                 heartbeat: { type: 'object' },
                 loopDetection: { type: 'object' },
                 governance: { type: 'object' },
+                growthVectors: { type: 'object' },
                 detectors: { type: 'object' }
             }
         }
@@ -104,12 +105,14 @@ module.exports = {
         const Identity = require('./lib/identity');
         const Heartbeat = require('./lib/heartbeat');
         const LoopDetection = require('./lib/loop-detection');
+        const VectorStore = require('./lib/vectorStore');
 
         const entropy = new Entropy(config, dataDir);
         const detectors = new Detectors(config);
         const identity = new Identity(config, dataDir);
         const heartbeat = new Heartbeat(config);
         const loopDetector = new LoopDetection(config);
+        const vectorStore = new VectorStore(config, dataDir);
 
         // -------------------------------------------------------------------
         // HOOK: before_agent_start — Inject stability context via prependContext
@@ -158,6 +161,33 @@ module.exports = {
                 lines.push(principlesLine);
             }
 
+            // Growth vector injection
+            if (config.growthVectors?.enabled !== false) {
+                try {
+                    // Fragmentation check — too many unresolved tensions
+                    const activeTensions = identity._activeTensions.filter(t => t.status === 'active').length;
+                    if (activeTensions > 5) {
+                        const fileVectors = vectorStore.loadVectors().length;
+                        const ratio = activeTensions / Math.max(fileVectors, 1);
+                        if (ratio > 3) {
+                            lines.push(`⚠ Fragmentation: ${activeTensions} unresolved tensions (ratio ${ratio.toFixed(1)}:1)`);
+                        }
+                    }
+
+                    const userMessage = _extractLastUserMessage(event);
+                    const relevantVectors = vectorStore.getRelevantVectors(
+                        userMessage, state.lastScore
+                    );
+                    if (relevantVectors.length > 0) {
+                        lines.push('');
+                        lines.push(vectorStore.formatForInjection(relevantVectors));
+                    }
+                } catch (err) {
+                    // Growth vector injection is best-effort — never block the hook
+                    console.warn('[Stability] Growth vector injection error:', err.message);
+                }
+            }
+
             return { prependContext: lines.join('\n') };
         }, { priority: 5 });
 
@@ -200,7 +230,7 @@ module.exports = {
                 const soulContent = resolveSoulMd(event);
                 if (soulContent) identity.loadPrinciplesFromSoulMd(soulContent);
             }
-            await identity.processTurn(userMessage, responseText, score, event.memory);
+            await identity.processTurn(userMessage, responseText, score, event.memory, vectorStore);
 
             // 6. Log heartbeat decision if this was a heartbeat turn
             if (event.metadata?.isHeartbeat) {
@@ -297,11 +327,17 @@ module.exports = {
 
         api.registerGatewayMethod('stability.getState', async ({ respond }) => {
             const state = entropy.getCurrentState();
+            const fileData = vectorStore.loadFile();
             respond(true, {
                 entropy: state.lastScore,
                 sustained: state.sustainedTurns,
                 principles: identity.getPrincipleNames(),
-                growthVectors: await identity.getVectorCount(),
+                growthVectors: {
+                    memoryApi: await identity.getVectorCount(),
+                    file: fileData.vectors.length,
+                    candidates: fileData.candidates.length,
+                    sessionTensions: identity._activeTensions.filter(t => t.status === 'active').length
+                },
                 tensions: await identity.getTensionCount()
             });
         });
@@ -315,7 +351,37 @@ module.exports = {
             });
         });
 
-        api.logger.info('Stability plugin registered — entropy monitoring, loop detection, heartbeat decisions active');
+        // -------------------------------------------------------------------
+        // Gateway methods: growth vector management
+        // -------------------------------------------------------------------
+
+        api.registerGatewayMethod('stability.getGrowthVectors', async ({ respond }) => {
+            const fileData = vectorStore.loadFile();
+            respond(true, {
+                total: fileData.vectors.length,
+                validated: fileData.vectors.filter(v => v.validation_status === 'validated').length,
+                candidates: fileData.candidates.length,
+                vectors: fileData.vectors.slice(0, 20),
+                candidateList: fileData.candidates.slice(0, 10),
+                sessionTensions: identity._activeTensions
+            });
+        });
+
+        api.registerGatewayMethod('stability.validateVector', async ({ params, respond }) => {
+            if (!params?.id) {
+                respond(false, { error: 'Missing required param: id' });
+                return;
+            }
+            const result = vectorStore.validateVector(params.id, params.note || '');
+            respond(result.success, result);
+        });
+
+        // Run lifecycle management on startup (prune old candidates, enforce limits)
+        try {
+            vectorStore.runLifecycle();
+        } catch (_) { /* best-effort */ }
+
+        api.logger.info('Stability plugin registered — entropy monitoring, loop detection, heartbeat decisions, growth vectors active');
     }
 };
 
@@ -330,4 +396,22 @@ function _extractText(msg) {
         return msg.content.map(c => c.text || c.content || '').join(' ');
     }
     return String(msg.content || '');
+}
+
+/**
+ * Extract the last user message from an event (for growth vector relevance scoring).
+ * Works with both before_agent_start (event.messages) and the raw message.
+ */
+function _extractLastUserMessage(event) {
+    // Try event.messages array (most common)
+    const messages = event.messages || [];
+    const lastUser = [...messages].reverse().find(m => m?.role === 'user');
+    if (lastUser) return _extractText(lastUser);
+
+    // Try event.message (some hook formats)
+    if (event.message) {
+        return typeof event.message === 'string' ? event.message : _extractText(event.message);
+    }
+
+    return '';
 }
