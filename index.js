@@ -115,6 +115,14 @@ module.exports = {
         const vectorStore = new VectorStore(config, dataDir);
 
         // -------------------------------------------------------------------
+        // Cross-hook state: growth vector feedback tracking
+        // Set in before_agent_start, read in agent_end.
+        // Pattern proven by continuity plugin's _lastRetrievalCache.
+        // -------------------------------------------------------------------
+        let _lastInjectedVectors = [];   // [{ id, relevanceScore }]
+        let _preInjectionEntropy = null;
+
+        // -------------------------------------------------------------------
         // HOOK: before_agent_start — Inject stability context via prependContext
         // Priority 5 (runs before continuity plugin at priority 10)
         // -------------------------------------------------------------------
@@ -175,14 +183,30 @@ module.exports = {
                     }
 
                     const userMessage = _extractLastUserMessage(event);
-                    const relevantVectors = vectorStore.getRelevantVectors(
-                        userMessage, state.lastScore
+                    const scoredResults = vectorStore.getRelevantVectors(
+                        userMessage, state.lastScore, { returnScores: true }
                     );
+                    const relevantVectors = scoredResults.map(sr => sr.vector);
+
+                    // Capture injection state for feedback loop
+                    if (config.growthVectors?.feedbackEnabled !== false && scoredResults.length > 0) {
+                        _preInjectionEntropy = state.lastScore;
+                        _lastInjectedVectors = scoredResults.map(sr => ({
+                            id: sr.vector.id,
+                            relevanceScore: sr.score
+                        }));
+                    } else {
+                        _lastInjectedVectors = [];
+                        _preInjectionEntropy = null;
+                    }
+
                     if (relevantVectors.length > 0) {
                         lines.push('');
                         lines.push(vectorStore.formatForInjection(relevantVectors));
                     }
                 } catch (err) {
+                    _lastInjectedVectors = [];
+                    _preInjectionEntropy = null;
                     // Growth vector injection is best-effort — never block the hook
                     console.warn('[Stability] Growth vector injection error:', err.message);
                 }
@@ -231,6 +255,37 @@ module.exports = {
                 if (soulContent) identity.loadPrinciplesFromSoulMd(soulContent);
             }
             await identity.processTurn(userMessage, responseText, score, event.memory, vectorStore);
+
+            // 5.5. Growth vector feedback loop — close the loop
+            if (config.growthVectors?.feedbackEnabled !== false
+                && _lastInjectedVectors.length > 0
+                && _preInjectionEntropy !== null) {
+                try {
+                    const entropyDelta = score - _preInjectionEntropy;
+                    const tensionDetected = !!(
+                        detectorResults.temporalMismatch
+                        || detectorResults.qualityDecay
+                        || (detectorResults.recursiveMetaBonus > 0)
+                    );
+
+                    for (const injected of _lastInjectedVectors) {
+                        vectorStore.recordFeedback(injected.id, {
+                            preEntropy: _preInjectionEntropy,
+                            postEntropy: score,
+                            entropyDelta,
+                            relevanceScore: injected.relevanceScore,
+                            tensionDetected,
+                            timestamp: new Date().toISOString()
+                        });
+                    }
+                } catch (err) {
+                    console.warn('[Stability] Growth vector feedback error:', err.message);
+                } finally {
+                    // Reset for next turn — prevent stale state leaking
+                    _lastInjectedVectors = [];
+                    _preInjectionEntropy = null;
+                }
+            }
 
             // 6. Log heartbeat decision if this was a heartbeat turn
             if (event.metadata?.isHeartbeat) {
@@ -374,6 +429,28 @@ module.exports = {
             }
             const result = vectorStore.validateVector(params.id, params.note || '');
             respond(result.success, result);
+        });
+
+        api.registerGatewayMethod('stability.getVectorFeedback', async ({ params, respond }) => {
+            if (params?.id) {
+                const feedback = vectorStore.getFeedback(params.id);
+                respond(!!feedback, feedback || { error: 'No feedback data for this vector' });
+            } else {
+                // Return summary for all vectors with feedback
+                try {
+                    const data = vectorStore._loadFeedbackFile();
+                    const summary = Object.entries(data).map(([id, record]) => ({
+                        id,
+                        avgEntropyDelta: record.avgEntropyDelta,
+                        totalInjections: record.totalInjections,
+                        lastUsed: record.lastUsed,
+                        entries: record.entries.length
+                    }));
+                    respond(true, { vectors: summary });
+                } catch (err) {
+                    respond(false, { error: err.message });
+                }
+            }
         });
 
         // Run lifecycle management on startup (prune old candidates, enforce limits)

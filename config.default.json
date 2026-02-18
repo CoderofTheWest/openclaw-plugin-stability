@@ -85,7 +85,10 @@
     "relevanceThreshold": 0.65,
     "maxVectors": 100,
     "cacheTtlMs": 30000,
-    "candidatePromotionThreshold": 3
+    "candidatePromotionThreshold": 3,
+    "feedbackEnabled": true,
+    "feedbackWindowSize": 10,
+    "weightAdjustmentCap": 0.1
   },
 
   "detectors": {
