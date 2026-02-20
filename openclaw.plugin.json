@@ -1,5 +1,5 @@
 {
-  "id": "stability",
+  "id": "openclaw-plugin-stability",
   "name": "Agent Stability & Introspection",
   "description": "Entropy monitoring, confabulation detection, loop guards, principle-aligned growth tracking, and structured heartbeat decisions. Makes any OpenClaw agent more stable, self-aware, and resistant to hallucination and drift.",
   "version": "0.1.0",
