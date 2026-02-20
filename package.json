@@ -13,16 +13,13 @@
     "identity",
     "heartbeat"
   ],
-  "author": "Chris Hunt",
+  "author": "Chris Hunt & Clint",
   "license": "MIT",
   "engines": {
     "node": ">=18.0.0"
   },
   "openclaw": {
-    "type": "plugin"
-  },
-  "openclaw.extensions": {
-    "stability": "./openclaw.plugin.json"
+    "extensions": ["./index.js"]
   },
   "files": [
     "index.js",

@@ -247,6 +247,21 @@ Your agent's identity documents don't just define personality — they define wh
 
 - **Context blocks visible in chat UI**: The `[STABILITY CONTEXT]` block injected via `prependContext` is displayed as part of the user message in OpenClaw's web dashboard. This is cosmetic — the model processes it correctly as stability awareness, but the dashboard doesn't yet collapse or hide plugin-injected content. This is an OpenClaw dashboard limitation, not a plugin bug.
 
+## Part of the Meta-Cognitive Suite
+
+This plugin is one of six that form a complete meta-cognitive loop for OpenClaw agents:
+
+1. **[stability](https://github.com/CoderofTheWest/openclaw-plugin-stability)** — Entropy monitoring, confabulation detection, principle alignment *(this plugin)*
+2. **[continuity](https://github.com/CoderofTheWest/openclaw-plugin-continuity)** — Cross-session memory, context budgeting, conversation archiving
+3. **[metabolism](https://github.com/CoderofTheWest/openclaw-plugin-metabolism)** — Conversation processing, implication extraction, knowledge gaps
+4. **[nightshift](https://github.com/CoderofTheWest/openclaw-plugin-nightshift)** — Off-hours scheduling for heavy processing
+5. **[contemplation](https://github.com/CoderofTheWest/openclaw-plugin-contemplation)** — Multi-pass inquiry from knowledge gaps
+6. **[crystallization](https://github.com/CoderofTheWest/openclaw-plugin-crystallization)** — Growth vectors become permanent character traits
+
+Load order: stability → continuity → metabolism → nightshift → contemplation → crystallization
+
+See [openclaw-metacognitive-suite](https://github.com/CoderofTheWest/openclaw-metacognitive-suite) for the full picture.
+
 ## License
 
 MIT

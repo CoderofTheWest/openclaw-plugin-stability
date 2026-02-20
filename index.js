@@ -14,6 +14,11 @@
  *
  * Hook registration uses api.on() (OpenClaw SDK typed hooks).
  * Stability context injected via prependContext (before identity kernel).
+ *
+ * Multi-agent: All state (entropy logs, growth vectors, feedback, tensions)
+ * is scoped per agent via ctx.agentId. Each agent gets its own data
+ * subdirectory under data/agents/{agentId}/. The default/main agent uses
+ * the legacy data/ path for backward compatibility.
  */
 
 const path = require('path');
@@ -43,6 +48,13 @@ function deepMerge(target, source) {
     return result;
 }
 
+function ensureDir(dirPath) {
+    if (!fs.existsSync(dirPath)) {
+        fs.mkdirSync(dirPath, { recursive: true });
+    }
+    return dirPath;
+}
+
 // ---------------------------------------------------------------------------
 // SOUL.md resolution — metadata preferred, direct file read as fallback
 // ---------------------------------------------------------------------------
@@ -62,6 +74,16 @@ function resolveSoulMd(event) {
         }
     } catch (_) { /* best effort */ }
     return null;
+}
+
+/**
+ * Resolve the workspace directory for an agent from event metadata.
+ * Falls back to the default workspace if not available.
+ */
+function resolveWorkspace(event) {
+    return event.metadata?.workspace
+        || process.env.OPENCLAW_WORKSPACE
+        || path.join(os.homedir(), '.openclaw', 'workspace');
 }
 
 // ---------------------------------------------------------------------------
@@ -90,14 +112,24 @@ module.exports = {
     register(api) {
         const config = loadConfig(api.pluginConfig || {});
 
-        // Ensure plugin-local data directory exists
-        const dataDir = path.join(__dirname, 'data');
-        if (!fs.existsSync(dataDir)) {
-            fs.mkdirSync(dataDir, { recursive: true });
-        }
+        // Base data directory for the plugin
+        const baseDataDir = ensureDir(path.join(__dirname, 'data'));
 
         // -------------------------------------------------------------------
-        // Shared module instances (accessible to all hooks + gateway methods)
+        // Per-agent state management
+        //
+        // Each agent gets its own isolated set of:
+        //   - Entropy (log files, history, sustained tracking)
+        //   - Detectors (stateless, but instantiated per-agent for isolation)
+        //   - Identity (principles, tensions, evolution tracking)
+        //   - Heartbeat (decision tracking)
+        //   - LoopDetection (consecutive-tool, file re-read, output hash)
+        //   - VectorStore (growth vectors, feedback)
+        //   - Cross-hook state (injected vectors, pre-injection entropy)
+        //
+        // Data directory layout:
+        //   data/                    <- default/main agent (backward compat)
+        //   data/agents/{agentId}/   <- all other agents
         // -------------------------------------------------------------------
 
         const Entropy = require('./lib/entropy');
@@ -106,21 +138,58 @@ module.exports = {
         const Heartbeat = require('./lib/heartbeat');
         const LoopDetection = require('./lib/loop-detection');
         const VectorStore = require('./lib/vectorStore');
+        const InvestigationService = require('./services/investigation');
 
-        const entropy = new Entropy(config, dataDir);
-        const detectors = new Detectors(config);
-        const identity = new Identity(config, dataDir);
-        const heartbeat = new Heartbeat(config);
-        const loopDetector = new LoopDetection(config);
-        const vectorStore = new VectorStore(config, dataDir);
+        /**
+         * Per-agent state container.
+         * Created lazily on first hook invocation for each agent.
+         */
+        class AgentState {
+            constructor(agentId, workspacePath) {
+                this.agentId = agentId;
 
-        // -------------------------------------------------------------------
-        // Cross-hook state: growth vector feedback tracking
-        // Set in before_agent_start, read in agent_end.
-        // Pattern proven by continuity plugin's _lastRetrievalCache.
-        // -------------------------------------------------------------------
-        let _lastInjectedVectors = [];   // [{ id, relevanceScore }]
-        let _preInjectionEntropy = null;
+                // Data directory: legacy path for default/main, scoped for others
+                if (!agentId || agentId === 'main') {
+                    this.dataDir = baseDataDir;
+                } else {
+                    this.dataDir = ensureDir(path.join(baseDataDir, 'agents', agentId));
+                }
+
+                // Workspace path (for growth vectors file resolution)
+                this.workspacePath = workspacePath
+                    || path.join(os.homedir(), '.openclaw', 'workspace');
+
+                // Per-agent module instances
+                this.entropy = new Entropy(config, this.dataDir);
+                this.detectors = new Detectors(config);
+                this.identity = new Identity(config, this.dataDir);
+                this.heartbeat = new Heartbeat(config);
+                this.loopDetector = new LoopDetection(config);
+                this.vectorStore = new VectorStore(config, this.dataDir, this.workspacePath);
+
+                // Cross-hook state: growth vector feedback tracking
+                this.lastInjectedVectors = [];   // [{ id, relevanceScore }]
+                this.preInjectionEntropy = null;
+            }
+        }
+
+        /** @type {Map<string, AgentState>} */
+        const agentStates = new Map();
+
+        /**
+         * Get or create per-agent state.
+         * @param {string} [agentId] - Agent ID from hook context
+         * @param {string} [workspacePath] - Agent's workspace directory
+         * @returns {AgentState}
+         */
+        function getAgentState(agentId, workspacePath) {
+            const id = agentId || 'main';
+            if (!agentStates.has(id)) {
+                agentStates.set(id, new AgentState(id, workspacePath));
+                api.logger.info(`Initialized stability state for agent "${id}" (data: ${agentStates.get(id).dataDir})`);
+            }
+            return agentStates.get(id);
+        }
 
         // -------------------------------------------------------------------
         // HOOK: before_agent_start — Inject stability context via prependContext
@@ -128,32 +197,35 @@ module.exports = {
         // -------------------------------------------------------------------
 
         api.on('before_agent_start', async (event, ctx) => {
+            const workspace = resolveWorkspace(event);
+            const state = getAgentState(ctx.agentId, workspace);
+
             // Load principles from SOUL.md (metadata or direct file read)
-            if (identity.usingFallback) {
+            if (state.identity.usingFallback) {
                 const soulContent = resolveSoulMd(event);
-                if (soulContent) identity.loadPrinciplesFromSoulMd(soulContent);
+                if (soulContent) state.identity.loadPrinciplesFromSoulMd(soulContent);
             }
 
             // Build stability context block
-            const state = entropy.getCurrentState();
-            const principles = identity.getPrincipleNames();
+            const entropyState = state.entropy.getCurrentState();
+            const principles = state.identity.getPrincipleNames();
 
             // Entropy status
-            const entropyLabel = state.lastScore > 1.0 ? 'CRITICAL'
-                : state.lastScore > 0.8 ? 'elevated'
-                : state.lastScore > 0.4 ? 'active'
+            const entropyLabel = entropyState.lastScore > 1.0 ? 'CRITICAL'
+                : entropyState.lastScore > 0.8 ? 'elevated'
+                : entropyState.lastScore > 0.4 ? 'active'
                 : 'nominal';
 
             const lines = ['[STABILITY CONTEXT]'];
-            let entropyLine = `Entropy: ${state.lastScore.toFixed(2)} (${entropyLabel})`;
+            let entropyLine = `Entropy: ${entropyState.lastScore.toFixed(2)} (${entropyLabel})`;
 
-            if (state.sustainedTurns > 0) {
-                entropyLine += ` | Sustained: ${state.sustainedTurns} turns (${state.sustainedMinutes}min)`;
+            if (entropyState.sustainedTurns > 0) {
+                entropyLine += ` | Sustained: ${entropyState.sustainedTurns} turns (${entropyState.sustainedMinutes}min)`;
             }
             lines.push(entropyLine);
 
             // Recent heartbeat decisions
-            const recentDecisions = await heartbeat.readRecentDecisions(event.memory);
+            const recentDecisions = await state.heartbeat.readRecentDecisions(event.memory);
             if (recentDecisions.length > 0) {
                 lines.push('Recent decisions: ' + recentDecisions.map(d =>
                     `${d.decision.split(' — ')[0]}`
@@ -163,7 +235,7 @@ module.exports = {
             // Principle alignment status
             if (principles.length > 0) {
                 let principlesLine = `Principles: ${principles.join(', ')} | Alignment: stable`;
-                if (identity.usingFallback) {
+                if (state.identity.usingFallback) {
                     principlesLine += ' (defaults — add ## Core Principles to SOUL.md to customize)';
                 }
                 lines.push(principlesLine);
@@ -173,9 +245,9 @@ module.exports = {
             if (config.growthVectors?.enabled !== false) {
                 try {
                     // Fragmentation check — too many unresolved tensions
-                    const activeTensions = identity._activeTensions.filter(t => t.status === 'active').length;
+                    const activeTensions = state.identity._activeTensions.filter(t => t.status === 'active').length;
                     if (activeTensions > 5) {
-                        const fileVectors = vectorStore.loadVectors().length;
+                        const fileVectors = state.vectorStore.loadVectors().length;
                         const ratio = activeTensions / Math.max(fileVectors, 1);
                         if (ratio > 3) {
                             lines.push(`⚠ Fragmentation: ${activeTensions} unresolved tensions (ratio ${ratio.toFixed(1)}:1)`);
@@ -183,32 +255,32 @@ module.exports = {
                     }
 
                     const userMessage = _extractLastUserMessage(event);
-                    const scoredResults = vectorStore.getRelevantVectors(
-                        userMessage, state.lastScore, { returnScores: true }
+                    const scoredResults = state.vectorStore.getRelevantVectors(
+                        userMessage, entropyState.lastScore, { returnScores: true }
                     );
                     const relevantVectors = scoredResults.map(sr => sr.vector);
 
                     // Capture injection state for feedback loop
                     if (config.growthVectors?.feedbackEnabled !== false && scoredResults.length > 0) {
-                        _preInjectionEntropy = state.lastScore;
-                        _lastInjectedVectors = scoredResults.map(sr => ({
+                        state.preInjectionEntropy = entropyState.lastScore;
+                        state.lastInjectedVectors = scoredResults.map(sr => ({
                             id: sr.vector.id,
                             relevanceScore: sr.score
                         }));
                     } else {
-                        _lastInjectedVectors = [];
-                        _preInjectionEntropy = null;
+                        state.lastInjectedVectors = [];
+                        state.preInjectionEntropy = null;
                     }
 
                     if (relevantVectors.length > 0) {
                         lines.push('');
-                        lines.push(vectorStore.formatForInjection(relevantVectors));
+                        lines.push(state.vectorStore.formatForInjection(relevantVectors));
                     }
                 } catch (err) {
-                    _lastInjectedVectors = [];
-                    _preInjectionEntropy = null;
+                    state.lastInjectedVectors = [];
+                    state.preInjectionEntropy = null;
                     // Growth vector injection is best-effort — never block the hook
-                    console.warn('[Stability] Growth vector injection error:', err.message);
+                    console.warn(`[Stability:${state.agentId}] Growth vector injection error:`, err.message);
                 }
             }
 
@@ -220,6 +292,8 @@ module.exports = {
         // -------------------------------------------------------------------
 
         api.on('agent_end', async (event, ctx) => {
+            const state = getAgentState(ctx.agentId);
+
             const messages = event.messages || [];
             const lastAssistant = [...messages].reverse().find(m => m?.role === 'assistant');
             const lastUser = [...messages].reverse().find(m => m?.role === 'user');
@@ -230,18 +304,18 @@ module.exports = {
             const responseText = _extractText(lastAssistant);
 
             // 1. Run detectors
-            const detectorResults = detectors.runAll(userMessage, responseText);
+            const detectorResults = state.detectors.runAll(userMessage, responseText);
 
             // 2. Calculate composite entropy
-            const score = entropy.calculateEntropyScore(
+            const score = state.entropy.calculateEntropyScore(
                 userMessage, responseText, detectorResults
             );
 
             // 3. Track sustained entropy
-            const sustained = entropy.trackSustainedEntropy(score);
+            const sustained = state.entropy.trackSustainedEntropy(score);
 
             // 4. Log observation
-            await entropy.logObservation({
+            await state.entropy.logObservation({
                 score,
                 sustained: sustained.turns,
                 detectors: detectorResults,
@@ -250,27 +324,27 @@ module.exports = {
             });
 
             // 5. Identity evolution — check for principle-aligned resolutions
-            if (identity.usingFallback) {
+            if (state.identity.usingFallback) {
                 const soulContent = resolveSoulMd(event);
-                if (soulContent) identity.loadPrinciplesFromSoulMd(soulContent);
+                if (soulContent) state.identity.loadPrinciplesFromSoulMd(soulContent);
             }
-            await identity.processTurn(userMessage, responseText, score, event.memory, vectorStore);
+            await state.identity.processTurn(userMessage, responseText, score, event.memory, state.vectorStore);
 
             // 5.5. Growth vector feedback loop — close the loop
             if (config.growthVectors?.feedbackEnabled !== false
-                && _lastInjectedVectors.length > 0
-                && _preInjectionEntropy !== null) {
+                && state.lastInjectedVectors.length > 0
+                && state.preInjectionEntropy !== null) {
                 try {
-                    const entropyDelta = score - _preInjectionEntropy;
+                    const entropyDelta = score - state.preInjectionEntropy;
                     const tensionDetected = !!(
                         detectorResults.temporalMismatch
                         || detectorResults.qualityDecay
                         || (detectorResults.recursiveMetaBonus > 0)
                     );
 
-                    for (const injected of _lastInjectedVectors) {
-                        vectorStore.recordFeedback(injected.id, {
-                            preEntropy: _preInjectionEntropy,
+                    for (const injected of state.lastInjectedVectors) {
+                        state.vectorStore.recordFeedback(injected.id, {
+                            preEntropy: state.preInjectionEntropy,
                             postEntropy: score,
                             entropyDelta,
                             relevanceScore: injected.relevanceScore,
@@ -279,23 +353,23 @@ module.exports = {
                         });
                     }
                 } catch (err) {
-                    console.warn('[Stability] Growth vector feedback error:', err.message);
+                    console.warn(`[Stability:${state.agentId}] Growth vector feedback error:`, err.message);
                 } finally {
                     // Reset for next turn — prevent stale state leaking
-                    _lastInjectedVectors = [];
-                    _preInjectionEntropy = null;
+                    state.lastInjectedVectors = [];
+                    state.preInjectionEntropy = null;
                 }
             }
 
             // 6. Log heartbeat decision if this was a heartbeat turn
             if (event.metadata?.isHeartbeat) {
-                await heartbeat.logDecision(responseText, event.memory);
+                await state.heartbeat.logDecision(responseText, event.memory);
             }
 
             // 7. Warn on sustained critical entropy
             if (sustained.sustained) {
                 api.logger.warn(
-                    `SUSTAINED CRITICAL ENTROPY: ${sustained.turns} turns, ` +
+                    `[${state.agentId}] SUSTAINED CRITICAL ENTROPY: ${sustained.turns} turns, ` +
                     `${sustained.minutes} minutes above threshold`
                 );
             }
@@ -306,6 +380,8 @@ module.exports = {
         // -------------------------------------------------------------------
 
         api.on('after_tool_call', (event, ctx) => {
+            const state = getAgentState(ctx.agentId);
+
             const toolName = event.toolName || event.name || '';
             const toolResult = event.result || event.toolResult || '';
             const toolParams = event.params || event.toolParams || {};
@@ -314,10 +390,10 @@ module.exports = {
                 ? toolResult
                 : JSON.stringify(toolResult || '');
 
-            const result = loopDetector.recordAndCheck(toolName, output, toolParams);
+            const result = state.loopDetector.recordAndCheck(toolName, output, toolParams);
 
             if (result.loopDetected) {
-                api.logger.warn(`Loop detected (${result.type}): ${result.message}`);
+                api.logger.warn(`[${state.agentId}] Loop detected (${result.type}): ${result.message}`);
 
                 return {
                     systemMessage: `[LOOP DETECTED] ${result.message}`
@@ -332,17 +408,18 @@ module.exports = {
         // -------------------------------------------------------------------
 
         api.on('before_compaction', async (event, ctx) => {
-            const state = entropy.getCurrentState();
+            const state = getAgentState(ctx.agentId);
+            const entropyState = state.entropy.getCurrentState();
 
-            if (state.lastScore > 0.6 || state.sustainedTurns > 0) {
+            if (entropyState.lastScore > 0.6 || entropyState.sustainedTurns > 0) {
                 const summary = [
                     `[Stability Pre-Compaction Summary]`,
-                    `Last entropy: ${state.lastScore.toFixed(2)}`,
-                    state.sustainedTurns > 0
-                        ? `Sustained high entropy: ${state.sustainedTurns} turns (${state.sustainedMinutes}min)`
+                    `Last entropy: ${entropyState.lastScore.toFixed(2)}`,
+                    entropyState.sustainedTurns > 0
+                        ? `Sustained high entropy: ${entropyState.sustainedTurns} turns (${entropyState.sustainedMinutes}min)`
                         : null,
-                    state.recentHistory.length > 0
-                        ? `Recent pattern: ${state.recentHistory.map(h => h.entropy.toFixed(2)).join(' → ')}`
+                    entropyState.recentHistory.length > 0
+                        ? `Recent pattern: ${entropyState.recentHistory.map(h => h.entropy.toFixed(2)).join(' → ')}`
                         : null
                 ].filter(Boolean).join('\n');
 
@@ -361,10 +438,10 @@ module.exports = {
 
         // -------------------------------------------------------------------
         // Service: investigation background service
+        // Uses main agent's data dir (investigation is system-wide, not per-agent)
         // -------------------------------------------------------------------
 
-        const InvestigationService = require('./services/investigation');
-        const investigation = new InvestigationService(config, dataDir);
+        const investigation = new InvestigationService(config, baseDataDir);
 
         api.registerService({
             id: 'stability-investigation',
@@ -377,30 +454,47 @@ module.exports = {
         });
 
         // -------------------------------------------------------------------
-        // Gateway method: state inspection
+        // Gateway methods: state inspection
+        // Accept optional agentId param; default to 'main'.
         // -------------------------------------------------------------------
 
-        api.registerGatewayMethod('stability.getState', async ({ respond }) => {
-            const state = entropy.getCurrentState();
-            const fileData = vectorStore.loadFile();
+        api.registerGatewayMethod('stability.getState', async ({ params, respond }) => {
+            const state = getAgentState(params?.agentId);
+            const entropyState = state.entropy.getCurrentState();
+            const fileData = state.vectorStore.loadFile();
             respond(true, {
-                entropy: state.lastScore,
-                sustained: state.sustainedTurns,
-                principles: identity.getPrincipleNames(),
+                agentId: state.agentId,
+                entropy: entropyState.lastScore,
+                sustained: entropyState.sustainedTurns,
+                principles: state.identity.getPrincipleNames(),
                 growthVectors: {
-                    memoryApi: await identity.getVectorCount(),
+                    memoryApi: await state.identity.getVectorCount(),
                     file: fileData.vectors.length,
                     candidates: fileData.candidates.length,
-                    sessionTensions: identity._activeTensions.filter(t => t.status === 'active').length
+                    sessionTensions: state.identity._activeTensions.filter(t => t.status === 'active').length
                 },
-                tensions: await identity.getTensionCount()
+                tensions: await state.identity.getTensionCount()
             });
         });
 
-        api.registerGatewayMethod('stability.getPrinciples', async ({ respond }) => {
+        // Expose entropy for inter-plugin communication (metabolism plugin)
+        api.stability = {
+            getEntropy: (agentId) => {
+                const state = getAgentState(agentId);
+                return state.entropy.getCurrentState().lastScore;
+            },
+            getEntropyState: (agentId) => {
+                const state = getAgentState(agentId);
+                return state.entropy.getCurrentState();
+            }
+        };
+
+        api.registerGatewayMethod('stability.getPrinciples', async ({ params, respond }) => {
+            const state = getAgentState(params?.agentId);
             respond(true, {
-                principles: identity.getPrincipleNames(),
-                source: identity.usingFallback ? 'config-fallback' : 'soul.md',
+                agentId: state.agentId,
+                principles: state.identity.getPrincipleNames(),
+                source: state.identity.usingFallback ? 'config-fallback' : 'soul.md',
                 format: '## Core Principles\n- **Name**: description',
                 fallback: config.principles.fallback.map(p => p.name)
             });
@@ -410,15 +504,17 @@ module.exports = {
         // Gateway methods: growth vector management
         // -------------------------------------------------------------------
 
-        api.registerGatewayMethod('stability.getGrowthVectors', async ({ respond }) => {
-            const fileData = vectorStore.loadFile();
+        api.registerGatewayMethod('stability.getGrowthVectors', async ({ params, respond }) => {
+            const state = getAgentState(params?.agentId);
+            const fileData = state.vectorStore.loadFile();
             respond(true, {
+                agentId: state.agentId,
                 total: fileData.vectors.length,
                 validated: fileData.vectors.filter(v => v.validation_status === 'validated').length,
                 candidates: fileData.candidates.length,
                 vectors: fileData.vectors.slice(0, 20),
                 candidateList: fileData.candidates.slice(0, 10),
-                sessionTensions: identity._activeTensions
+                sessionTensions: state.identity._activeTensions
             });
         });
 
@@ -427,18 +523,20 @@ module.exports = {
                 respond(false, { error: 'Missing required param: id' });
                 return;
             }
-            const result = vectorStore.validateVector(params.id, params.note || '');
+            const state = getAgentState(params?.agentId);
+            const result = state.vectorStore.validateVector(params.id, params.note || '');
             respond(result.success, result);
         });
 
         api.registerGatewayMethod('stability.getVectorFeedback', async ({ params, respond }) => {
+            const state = getAgentState(params?.agentId);
             if (params?.id) {
-                const feedback = vectorStore.getFeedback(params.id);
+                const feedback = state.vectorStore.getFeedback(params.id);
                 respond(!!feedback, feedback || { error: 'No feedback data for this vector' });
             } else {
                 // Return summary for all vectors with feedback
                 try {
-                    const data = vectorStore._loadFeedbackFile();
+                    const data = state.vectorStore._loadFeedbackFile();
                     const summary = Object.entries(data).map(([id, record]) => ({
                         id,
                         avgEntropyDelta: record.avgEntropyDelta,
@@ -446,19 +544,35 @@ module.exports = {
                         lastUsed: record.lastUsed,
                         entries: record.entries.length
                     }));
-                    respond(true, { vectors: summary });
+                    respond(true, { agentId: state.agentId, vectors: summary });
                 } catch (err) {
                     respond(false, { error: err.message });
                 }
             }
         });
 
-        // Run lifecycle management on startup (prune old candidates, enforce limits)
+        // List all initialized agent states (diagnostic)
+        api.registerGatewayMethod('stability.listAgents', async ({ respond }) => {
+            const agents = [];
+            for (const [id, state] of agentStates) {
+                agents.push({
+                    agentId: id,
+                    dataDir: state.dataDir,
+                    workspacePath: state.workspacePath,
+                    vectorFilePath: state.vectorStore.filePath
+                });
+            }
+            respond(true, { agents });
+        });
+
+        // Run lifecycle management on startup for main agent
+        // (other agents run lifecycle on first access)
         try {
-            vectorStore.runLifecycle();
+            const mainState = getAgentState('main');
+            mainState.vectorStore.runLifecycle();
         } catch (_) { /* best-effort */ }
 
-        api.logger.info('Stability plugin registered — entropy monitoring, loop detection, heartbeat decisions, growth vectors active');
+        api.logger.info('Stability plugin registered — multi-agent entropy monitoring, loop detection, heartbeat decisions, growth vectors active');
     }
 };
 
