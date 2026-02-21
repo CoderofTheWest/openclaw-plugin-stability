@@ -1,5 +1,5 @@
 {
-  "name": "openclaw-plugin-stability",
+  "name": "stability",
   "version": "0.1.0",
   "description": "Agent stability, introspection, and anti-drift framework for OpenClaw. Provides entropy monitoring, confabulation detection, loop guards, principle-aligned growth tracking, and structured heartbeat decisions.",
   "main": "index.js",
