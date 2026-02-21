@@ -91,7 +91,7 @@ function resolveWorkspace(event) {
 // ---------------------------------------------------------------------------
 
 module.exports = {
-    id: 'stability',
+    id: 'openclaw-plugin-stability',
     name: 'Agent Stability & Introspection',
 
     configSchema: {
