@@ -300,7 +300,7 @@ module.exports = {
 
             if (!lastAssistant || !lastUser) return;
 
-            const userMessage = _extractText(lastUser);
+            const userMessage = _stripContextBlocks(_extractText(lastUser));
             const responseText = _extractText(lastAssistant);
 
             // 1. Run detectors
@@ -590,6 +590,61 @@ function _extractText(msg) {
 }
 
 /**
+ * Strip plugin-injected context blocks from user message text.
+ *
+ * OpenClaw bakes prependContext into the user message, so by the time
+ * agent_end fires the user message starts with [CONTINUITY CONTEXT]
+ * and/or [STABILITY CONTEXT] blocks followed by the actual user text.
+ * This strips those blocks so downstream consumers (detectors, identity,
+ * candidate vector creation) operate on real user content.
+ */
+function _stripContextBlocks(text) {
+    if (!text) return '';
+
+    // Fast path: no context blocks present
+    if (!text.startsWith('[CONTINUITY CONTEXT]') &&
+        !text.startsWith('[STABILITY CONTEXT]') &&
+        !text.startsWith('You remember these earlier conversations') &&
+        !text.startsWith('From your knowledge base:')) {
+        return text;
+    }
+
+    // Look for timestamp marker that signals start of real user text
+    // e.g. [Mon 2026-02-16 08:57 PST] or [Tue 2026-02-18 14:22 PST]
+    const tsMatch = text.match(/\n\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s[^\]]*\]\s*/);
+    if (tsMatch) {
+        return text.substring(tsMatch.index + tsMatch[0].length);
+    }
+
+    // Fallback: strip known block prefixes line by line
+    const lines = text.split('\n');
+    const realStart = lines.findIndex(line =>
+        line.length > 0 &&
+        !line.startsWith('[CONTINUITY CONTEXT]') &&
+        !line.startsWith('[STABILITY CONTEXT]') &&
+        !line.startsWith('[TOPIC NOTE]') &&
+        !line.startsWith('[ARCHIVE RETRIEVAL]') &&
+        !line.startsWith('Session:') &&
+        !line.startsWith('Topics:') &&
+        !line.startsWith('You remember') &&
+        !line.startsWith('From your knowledge') &&
+        !line.startsWith('  User:') &&
+        !line.startsWith('  Agent:') &&
+        !line.match(/^\[.*\]$/) && // standalone bracketed lines
+        !line.match(/^Entropy:/) &&
+        !line.match(/^Fingerprint:/) &&
+        !line.match(/^Loops:/) &&
+        !line.match(/^Anchors:/)
+    );
+
+    if (realStart > 0) {
+        return lines.slice(realStart).join('\n').trim();
+    }
+
+    return text;
+}
+
+/**
  * Extract the last user message from an event (for growth vector relevance scoring).
  * Works with both before_agent_start (event.messages) and the raw message.
  */
@@ -597,11 +652,12 @@ function _extractLastUserMessage(event) {
     // Try event.messages array (most common)
     const messages = event.messages || [];
     const lastUser = [...messages].reverse().find(m => m?.role === 'user');
-    if (lastUser) return _extractText(lastUser);
+    if (lastUser) return _stripContextBlocks(_extractText(lastUser));
 
     // Try event.message (some hook formats)
     if (event.message) {
-        return typeof event.message === 'string' ? event.message : _extractText(event.message);
+        const raw = typeof event.message === 'string' ? event.message : _extractText(event.message);
+        return _stripContextBlocks(raw);
     }
 
     return '';
