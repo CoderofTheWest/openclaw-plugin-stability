@@ -64,7 +64,8 @@
   "loopDetection": {
     "consecutiveToolThreshold": 5,
     "fileRereadThreshold": 3,
-    "injectWarning": true
+    "injectWarning": true,
+    "exemptTools": ["exec", "process", "arc-agi.executeCode", "arc_agi_execute_code", "arc_agi_load_puzzle", "arc_agi_store_attempt"]
   },
 
   "governance": {

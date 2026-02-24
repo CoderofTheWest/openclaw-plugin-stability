@@ -224,33 +224,40 @@ module.exports = {
             }
             lines.push(entropyLine);
 
-            // Recent heartbeat decisions
-            const recentDecisions = await state.heartbeat.readRecentDecisions(event.memory);
-            if (recentDecisions.length > 0) {
-                lines.push('Recent decisions: ' + recentDecisions.map(d =>
-                    `${d.decision.split(' — ')[0]}`
-                ).join(', '));
-            }
+            // Tiered injection: nominal = entropy only, active+ = add context
+            const isElevated = entropyState.lastScore > 0.4;
 
-            // Principle alignment status
-            if (principles.length > 0) {
-                let principlesLine = `Principles: ${principles.join(', ')} | Alignment: stable`;
-                if (state.identity.usingFallback) {
-                    principlesLine += ' (defaults — add ## Core Principles to SOUL.md to customize)';
+            if (isElevated) {
+                // Recent heartbeat decisions (only when active/elevated)
+                const recentDecisions = await state.heartbeat.readRecentDecisions(event.memory);
+                if (recentDecisions.length > 0) {
+                    lines.push('Recent decisions: ' + recentDecisions.map(d =>
+                        `${d.decision.split(' — ')[0]}`
+                    ).join(', '));
                 }
-                lines.push(principlesLine);
+
+                // Principle alignment status (only when active/elevated)
+                if (principles.length > 0) {
+                    let principlesLine = `Principles: ${principles.join(', ')} | Alignment: stable`;
+                    if (state.identity.usingFallback) {
+                        principlesLine += ' (defaults — add ## Core Principles to SOUL.md to customize)';
+                    }
+                    lines.push(principlesLine);
+                }
             }
 
-            // Growth vector injection
+            // Growth vector injection (only when elevated, or high-relevance match)
             if (config.growthVectors?.enabled !== false) {
                 try {
-                    // Fragmentation check — too many unresolved tensions
-                    const activeTensions = state.identity._activeTensions.filter(t => t.status === 'active').length;
-                    if (activeTensions > 5) {
-                        const fileVectors = state.vectorStore.loadVectors().length;
-                        const ratio = activeTensions / Math.max(fileVectors, 1);
-                        if (ratio > 3) {
-                            lines.push(`⚠ Fragmentation: ${activeTensions} unresolved tensions (ratio ${ratio.toFixed(1)}:1)`);
+                    // Fragmentation check — only when elevated
+                    if (isElevated) {
+                        const activeTensions = state.identity._activeTensions.filter(t => t.status === 'active').length;
+                        if (activeTensions > 5) {
+                            const fileVectors = state.vectorStore.loadVectors().length;
+                            const ratio = activeTensions / Math.max(fileVectors, 1);
+                            if (ratio > 3) {
+                                lines.push(`⚠ Fragmentation: ${activeTensions} unresolved tensions (ratio ${ratio.toFixed(1)}:1)`);
+                            }
                         }
                     }
 
@@ -272,7 +279,9 @@ module.exports = {
                         state.preInjectionEntropy = null;
                     }
 
-                    if (relevantVectors.length > 0) {
+                    // Only inject vectors when elevated OR top match is highly relevant
+                    const topScore = scoredResults.length > 0 ? scoredResults[0].score : 0;
+                    if (relevantVectors.length > 0 && (isElevated || topScore > 0.8)) {
                         lines.push('');
                         lines.push(state.vectorStore.formatForInjection(relevantVectors));
                     }
@@ -590,6 +599,56 @@ function _extractText(msg) {
 }
 
 /**
+ * All known context block prefixes injected by OpenClaw plugins.
+ * Must stay in sync with the continuity plugin's CONTEXT_BLOCK_HEADERS.
+ */
+const CONTEXT_BLOCK_HEADERS = [
+    '[CONTINUITY CONTEXT]',
+    '[STABILITY CONTEXT]',
+    '[ACTIVE PROJECTS]',
+    '[ACTIVE CONSTRAINTS]',
+    '[OPEN DIRECTIVES',
+    '[GROWTH VECTORS]',
+    '[GRAPH CONTEXT]',
+    '[GRAPH NOTE]',
+    '[CONTEMPLATION STATE]',
+    '[TOPIC NOTE]',
+    '[ARCHIVE RETRIEVAL]',
+    '[LOOP DETECTED]',
+];
+
+const CONTEXT_LINE_PREFIXES = [
+    'Session:',
+    'Topics:',
+    'Anchors:',
+    'Entropy:',
+    'Principles:',
+    'Recent decisions:',
+    'Fingerprint:',
+    'Loops:',
+    'You remember these',
+    '- They told you:',
+    '  You said:',
+    'Speak from this memory',
+    'From your knowledge base:',
+    'You know these connections:',
+    'Active inquiries:',
+    'Recent insights',
+];
+
+function _isContextLine(line) {
+    if (line.length === 0) return true;
+    for (const header of CONTEXT_BLOCK_HEADERS) {
+        if (line.startsWith(header)) return true;
+    }
+    for (const prefix of CONTEXT_LINE_PREFIXES) {
+        if (line.startsWith(prefix)) return true;
+    }
+    if (line.startsWith('- "') || line.startsWith('  -')) return true;
+    return false;
+}
+
+/**
  * Strip plugin-injected context blocks from user message text.
  *
  * OpenClaw bakes prependContext into the user message, so by the time
@@ -602,44 +661,28 @@ function _stripContextBlocks(text) {
     if (!text) return '';
 
     // Fast path: no context blocks present
-    if (!text.startsWith('[CONTINUITY CONTEXT]') &&
-        !text.startsWith('[STABILITY CONTEXT]') &&
-        !text.startsWith('You remember these earlier conversations') &&
-        !text.startsWith('From your knowledge base:')) {
-        return text;
+    const hasBlock = CONTEXT_BLOCK_HEADERS.some(h => text.includes(h));
+    const hasRecall = text.includes('You remember these') || text.includes('From your knowledge base:');
+    if (!hasBlock && !hasRecall) return text;
+
+    // Primary: find the LAST timestamp marker (earlier ones may be inside recalled memories)
+    const tsRegex = /\n\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s\d{4}-\d{2}-\d{2}\s[^\]]*\]\s*/g;
+    let lastTsMatch = null;
+    let match;
+    while ((match = tsRegex.exec(text)) !== null) {
+        lastTsMatch = match;
+    }
+    if (lastTsMatch) {
+        return text.substring(lastTsMatch.index + lastTsMatch[0].length);
     }
 
-    // Look for timestamp marker that signals start of real user text
-    // e.g. [Mon 2026-02-16 08:57 PST] or [Tue 2026-02-18 14:22 PST]
-    const tsMatch = text.match(/\n\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s[^\]]*\]\s*/);
-    if (tsMatch) {
-        return text.substring(tsMatch.index + tsMatch[0].length);
-    }
-
-    // Fallback: strip known block prefixes line by line
+    // Fallback: strip known context lines from the beginning
     const lines = text.split('\n');
-    const realStart = lines.findIndex(line =>
-        line.length > 0 &&
-        !line.startsWith('[CONTINUITY CONTEXT]') &&
-        !line.startsWith('[STABILITY CONTEXT]') &&
-        !line.startsWith('[TOPIC NOTE]') &&
-        !line.startsWith('[ARCHIVE RETRIEVAL]') &&
-        !line.startsWith('Session:') &&
-        !line.startsWith('Topics:') &&
-        !line.startsWith('You remember') &&
-        !line.startsWith('From your knowledge') &&
-        !line.startsWith('  User:') &&
-        !line.startsWith('  Agent:') &&
-        !line.match(/^\[.*\]$/) && // standalone bracketed lines
-        !line.match(/^Entropy:/) &&
-        !line.match(/^Fingerprint:/) &&
-        !line.match(/^Loops:/) &&
-        !line.match(/^Anchors:/)
-    );
-
+    const realStart = lines.findIndex(line => !_isContextLine(line));
     if (realStart > 0) {
         return lines.slice(realStart).join('\n').trim();
     }
+    if (realStart < 0) return '';
 
     return text;
 }
